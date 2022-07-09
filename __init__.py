@@ -1,3 +1,13 @@
+bl_info = {
+    "name": "My Addons",
+    "description": "My Custom Addons",
+    "author": "Jake Mobley",
+    "version": (1, 0),
+    "blender": (2, 80, 0),
+    "location": "",
+    "category": "",
+}
+
 if "bpy" in locals():
     import importlib
 
