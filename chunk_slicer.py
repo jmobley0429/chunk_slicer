@@ -1,13 +1,3 @@
-bl_info = {
-    "name": "Chunk Slicer",
-    "description": "Slices an object into uniform chunks on selected axes.",
-    "author": "Jake Mobley",
-    "version": (1, 0),
-    "blender": (2, 80, 0),
-    "location": "Operator Search > Chunk Slicer",
-    "category": "Modeling",
-}
-
 import bpy
 import bmesh
 import re
@@ -46,7 +36,7 @@ class OBJECT_OT_chunk_slicer(bpy.types.Operator):
         min=2,
     )
     cleanup_threshold: bpy.props.FloatProperty(
-        name="Cleanup Threshold",
+        name="Object Cleanup Threshold",
         description="Size of objects dimensions to delete after slice operation.",
         default=0.005,
         precision=4,
@@ -82,6 +72,19 @@ class OBJECT_OT_chunk_slicer(bpy.types.Operator):
         description="""Will slice the object, even if it has non-manifold geometry.
         Might cause issues with the operator being able to create 'solid' chunks, or create overlapping geometry.""",
         default=False,
+    )
+
+    remove_doubles: bpy.props.BoolProperty(
+        name="Remove Doubles",
+        description="""Remove doubles or nearly-doubled vertices after slice operation.""",
+        default=False,
+    )
+
+    weld_distance: bpy.props.FloatProperty(
+        name="Distance",
+        description="Distance between vertices to weld if Remove Doubles is enabled",
+        default=0.002,
+        precision=4,
     )
 
     axes = list('xyz')
@@ -133,7 +136,7 @@ class OBJECT_OT_chunk_slicer(bpy.types.Operator):
             msg = "is not valid"
         else:
             msg = "is valid"
-        print(f"New Loc: {loc}, End Loc: {end_loc}, Difference:{loc_diff}, Location {msg}.")
+        # print(f"New Loc: {loc}, End Loc: {end_loc}, Difference:{loc_diff}, Location {msg}.")
         return overlaps
 
     @property
@@ -171,6 +174,9 @@ class OBJECT_OT_chunk_slicer(bpy.types.Operator):
             clear_outer=clear_outer,
             use_fill=self.fill,
         )
+        if self.remove_doubles:
+            bpy.ops.mesh.select_all(action="SELECT")
+            bpy.ops.mesh.remove_doubles(threshold=self.weld_distance)
         bpy.ops.mesh.select_all(action="DESELECT")
         bpy.ops.object.mode_set(mode="OBJECT")
         bpy.ops.object.select_all(action="DESELECT")
@@ -353,9 +359,6 @@ class OBJECT_OT_chunk_slicer(bpy.types.Operator):
             col.prop(self, "cell_size")
         elif self.slice_type == "RELATIVE":
             col.prop(self, "slice_qty")
-        col = layout.column(align=True)
-        col.prop(self, "cleanup_threshold")
-        col.prop(self, "reset_origins")
         row = layout.row()
         row.prop(self, "x")
         row.prop(self, "y")
@@ -363,38 +366,12 @@ class OBJECT_OT_chunk_slicer(bpy.types.Operator):
         col = layout.column(align=True)
         col.prop(self, "fill")
         col.prop(self, "force")
+        row = layout.row()
+        row.prop(self, 'remove_doubles')
+        row.prop(self, 'weld_distance')
+        col = layout.column(align=True)
+        col.prop(self, "cleanup_threshold")
+        col.prop(self, "reset_origins")
 
 
 classes = (OBJECT_OT_chunk_slicer,)
-
-
-addon_keymaps = []
-
-
-def register():
-    bpy.utils.register_class(OBJECT_OT_chunk_slicer)
-
-    # set keymap
-    keymap_operator = "object.chunk_slicer"
-    name = "3D View"
-    letter = "SLASH"
-    shift = 1
-    ctrl = 0
-    alt = 1
-    space_type = "VIEW_3D"
-
-    wm = bpy.context.window_manager
-    kc = wm.keyconfigs.addon
-    km = kc.keymaps.new(name=name, space_type=space_type)
-    kmi = km.keymap_items.new(keymap_operator, letter, 'PRESS', shift=shift, ctrl=ctrl, alt=alt)
-    kmi.active = True
-    addon_keymaps.append((km, kmi))
-
-
-def unregister():
-    bpy.utils.unregister_class(OBJECT_OT_chunk_slicer)
-    utils.unregister_keymaps(addon_keymaps)
-
-
-if __name__ == "__main__":
-    register()
