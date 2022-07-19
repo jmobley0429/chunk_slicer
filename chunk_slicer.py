@@ -1,6 +1,9 @@
 import bpy
 import bmesh
 import re
+
+import asyncio
+
 from mathutils import Vector
 from collections import defaultdict
 from my_pie_menus.resources import utils
@@ -36,7 +39,7 @@ class OBJECT_OT_chunk_slicer(bpy.types.Operator):
         min=2,
     )
     cleanup_threshold: bpy.props.FloatProperty(
-        name="Object Cleanup Threshold",
+        name="Cleanup Threshold",
         description="Size of objects dimensions to delete after slice operation.",
         default=0.005,
         precision=4,
@@ -72,19 +75,6 @@ class OBJECT_OT_chunk_slicer(bpy.types.Operator):
         description="""Will slice the object, even if it has non-manifold geometry.
         Might cause issues with the operator being able to create 'solid' chunks, or create overlapping geometry.""",
         default=False,
-    )
-
-    remove_doubles: bpy.props.BoolProperty(
-        name="Remove Doubles",
-        description="""Remove doubles or nearly-doubled vertices after slice operation.""",
-        default=False,
-    )
-
-    weld_distance: bpy.props.FloatProperty(
-        name="Distance",
-        description="Distance between vertices to weld if Remove Doubles is enabled",
-        default=0.002,
-        precision=4,
     )
 
     axes = list('xyz')
@@ -174,14 +164,11 @@ class OBJECT_OT_chunk_slicer(bpy.types.Operator):
             clear_outer=clear_outer,
             use_fill=self.fill,
         )
-        if self.remove_doubles:
-            bpy.ops.mesh.select_all(action="SELECT")
-            bpy.ops.mesh.remove_doubles(threshold=self.weld_distance)
         bpy.ops.mesh.select_all(action="DESELECT")
         bpy.ops.object.mode_set(mode="OBJECT")
         bpy.ops.object.select_all(action="DESELECT")
 
-    def _slice_operation(self, context):
+    async def _slice_operation(self, context):
         '''Perform larger scale steps to handle slicing of objects
         and organization of each object being sliced in succession'''
 
@@ -218,6 +205,7 @@ class OBJECT_OT_chunk_slicer(bpy.types.Operator):
         return sum([v <= self.cleanup_threshold for v in dims]) > 1
 
     def _cleanup_objs(self, context):
+        print("Cleaning up objects...")
         '''Check sliced objects for existing geometry/valid dimensions and then rename,
         otherwise delete.'''
 
@@ -240,6 +228,7 @@ class OBJECT_OT_chunk_slicer(bpy.types.Operator):
         if self.reset_origins:
             bpy.ops.object.origin_set(type='ORIGIN_GEOMETRY', center='MEDIAN')
         bpy.ops.object.select_all(action="DESELECT")
+        print("Done!")
 
     def _get_slice_locs(self):
         self.slice_locs = defaultdict(list)
@@ -282,15 +271,68 @@ class OBJECT_OT_chunk_slicer(bpy.types.Operator):
         self.current_obj = self.obj
         return context.window_manager.invoke_props_dialog(self)
 
+    async def async_slice(self, context, loc, index, outlist=None):
+        self.current_loc = loc
+        self.current_index = index
+        result = await self._slice_operation(context)
+        if result == "":
+            return False
+        if outlist is not None:
+            outlist.append(self.current_obj)
+        return True
+
     def execute(self, context):
+        self.sliced_x = []
+        self.sliced_y = []
+
+        print("Slicing...")
+
+        col_objs = context.collection.objects
+
+        async def slice_x():
+            self.current_axis = "x"
+            x_locs = self.slice_locs[self.current_axis]
+            coros = [self.async_slice(context, loc, index, outlist=self.sliced_x) for index, loc in enumerate(x_locs)]
+            await asyncio.gather(*coros)
+
+        async def slice_y():
+            self.current_axis = "y"
+            y_locs = self.slice_locs[self.current_axis]
+            # like here, if user didn't choose to slice on the x-axis, we just pretend
+            # the sliced_x list was just the first object all along.
+            if not self.sliced_x:
+                self.sliced_x = [self.obj]
+            for obj in self.sliced_x:
+                self.obj = obj
+                coros = [
+                    self.async_slice(context, loc, index, outlist=self.sliced_y) for index, loc in enumerate(y_locs)
+                ]
+                await asyncio.gather(*coros)
+                context.collection.objects.unlink(obj)
+
+        async def slice_z():
+            self.current_axis = "z"
+            z_locs = self.slice_locs[self.current_axis]
+            # same deal, if user only chose z then the slice_y is just the first obj.
+            # else if they chose x and z, then pretend that sliced_y is sliced_x
+            # without actually slicing y.
+            if not self.sliced_y:
+                if not self.sliced_x:
+                    self.sliced_y = [self.obj]
+                else:
+                    self.sliced_y = self.sliced_x
+            for obj in self.sliced_y:
+                self.obj = obj
+                coros = [self.async_slice(context, loc, index) for index, loc in enumerate(z_locs)]
+                await asyncio.gather(*coros)
+                context.collection.objects.unlink(obj)
+
         self._get_slice_locs()
         if not self.force and not (self._mesh_has_manifold_geom()):
             self.report(
                 {"WARNING"}, "Mesh must have manifold geometry to perform slice operation. Operation Cancelled."
             )
             return {"CANCELLED"}
-        sliced_x = []
-        sliced_y = []
 
         # Starts with the currently selected object,
         # duplicates that, slices that in one axis,
@@ -302,50 +344,17 @@ class OBJECT_OT_chunk_slicer(bpy.types.Operator):
         if self.num_axes_selected == 0:
             self.report({"ERROR"}, "Must select at least one slice axis.")
             return {"CANCELLED"}
+        loop = asyncio.get_event_loop()
+
         if self.x:
-            self.current_axis = "x"
-            x_locs = self.slice_locs[self.current_axis]
-            for index, loc in enumerate(x_locs):
-                self.current_loc = loc
-                self.current_index = index
-                self._slice_operation(context)
-                sliced_x.append(self.current_obj)
+            loop.run_until_complete(slice_x())
             self.obj.hide_set(True)
             self.obj.name = "Sliced_Original"
         if self.y:
-            self.current_axis = "y"
-            y_locs = self.slice_locs[self.current_axis]
-            # like here, if user didn't choose to slice on the x-axis, we just pretend
-            # the sliced_x list was just the first object all along.
-            if not sliced_x:
-                sliced_x = [self.obj]
-            for obj in sliced_x:
-                self.obj = obj
-                for index, loc in enumerate(y_locs):
-                    self.current_loc = loc
-                    self.current_index = index
-                    self._slice_operation(context)
-                    sliced_y.append(self.current_obj)
-                context.collection.objects.unlink(obj)
-                # context.collection.objects.unlink(obj)
+            loop.run_until_complete(slice_y())
         if self.z:
-            self.current_axis = "z"
-            z_locs = self.slice_locs[self.current_axis]
-            # same deal, if user only chose z then the slice_y is just the first obj.
-            # else if they chose x and z, then pretend that sliced_y is sliced_x
-            # without actually slicing y.
-            if not sliced_y:
-                if not sliced_x:
-                    sliced_y = [self.obj]
-                else:
-                    sliced_y = sliced_x
-            for obj in sliced_y:
-                self.obj = obj
-                for index, loc in enumerate(z_locs):
-                    self.current_loc = loc
-                    self.current_index = index
-                    self._slice_operation(context)
-                context.collection.objects.unlink(obj)
+            loop.run_until_complete(slice_z())
+
         self._cleanup_objs(context)
         return {'FINISHED'}
 
@@ -359,6 +368,9 @@ class OBJECT_OT_chunk_slicer(bpy.types.Operator):
             col.prop(self, "cell_size")
         elif self.slice_type == "RELATIVE":
             col.prop(self, "slice_qty")
+        col = layout.column(align=True)
+        col.prop(self, "cleanup_threshold")
+        col.prop(self, "reset_origins")
         row = layout.row()
         row.prop(self, "x")
         row.prop(self, "y")
@@ -366,12 +378,6 @@ class OBJECT_OT_chunk_slicer(bpy.types.Operator):
         col = layout.column(align=True)
         col.prop(self, "fill")
         col.prop(self, "force")
-        row = layout.row()
-        row.prop(self, 'remove_doubles')
-        row.prop(self, 'weld_distance')
-        col = layout.column(align=True)
-        col.prop(self, "cleanup_threshold")
-        col.prop(self, "reset_origins")
 
 
 classes = (OBJECT_OT_chunk_slicer,)
