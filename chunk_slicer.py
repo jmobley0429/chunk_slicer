@@ -1,3 +1,6 @@
+import pprint
+
+
 import bpy
 import bmesh
 import re
@@ -11,6 +14,9 @@ from my_pie_menus.resources import utils
 
 class OBJECT_OT_chunk_slicer(bpy.types.Operator):
     """Slice object into chunks"""
+
+    debug_slice = False
+    debug_cleanup = False
 
     bl_idname = "object.chunk_slicer"
     bl_label = "Chunk Slicer"
@@ -26,7 +32,6 @@ class OBJECT_OT_chunk_slicer(bpy.types.Operator):
             ("FIXED", "Fixed", "Slice based on a fixed world space size."),
         ],
     )
-
     cell_size: bpy.props.FloatProperty(
         name="Cell Size",
         description="Cell size in world units. Sizes larger than the objects size on one axis will result in no effect.",
@@ -69,14 +74,12 @@ class OBJECT_OT_chunk_slicer(bpy.types.Operator):
         description="Use the 'Fill' option in the mesh bisect. Creates solid chunks, rather than a hollow mesh.",
         default=True,
     )
-
     force: bpy.props.BoolProperty(
         name="Force Non-Manifold",
         description="""Will slice the object, even if it has non-manifold geometry.
         Might cause issues with the operator being able to create 'solid' chunks, or create overlapping geometry.""",
         default=False,
     )
-
     axes = list('xyz')
 
     @property
@@ -138,7 +141,7 @@ class OBJECT_OT_chunk_slicer(bpy.types.Operator):
         return all([e.is_manifold for e in self.bm.edges[:]])
 
     def _rename_temp(self, object):
-        object.name = f"__Sliced__{self.current_index}"
+        object.name = f"__Sliced__{self.current_index}__{self.current_axis}"
 
     def _duplicate_obj(self, context):
         '''Duplicate the current object, set it to be the current slice_object
@@ -154,6 +157,8 @@ class OBJECT_OT_chunk_slicer(bpy.types.Operator):
 
     def _slice(self, axis, clear_inner=False, clear_outer=False):
         '''Perform the steps required to slice the current object.'''
+        if self.debug_slice:
+            print(f"Object: {self.current_obj.name}, Slice Loc: {self.current_loc}")
         self.current_obj.select_set(True)
         bpy.ops.object.mode_set(mode="EDIT")
         bpy.ops.mesh.select_all(action="SELECT")
@@ -188,6 +193,9 @@ class OBJECT_OT_chunk_slicer(bpy.types.Operator):
         self._duplicate_obj(context)
         axis = self.current_axis
         i = self.current_index
+        if self.debug_slice:
+            print("*** SLICING ***")
+            print(f"Axis: {axis}, Index: {i}")
         # first cut (index == 0) we only need to slice one time, otherwise we slice directly
         # one the far edge of the object.
         if i != 0:
@@ -205,26 +213,44 @@ class OBJECT_OT_chunk_slicer(bpy.types.Operator):
         return sum([v <= self.cleanup_threshold for v in dims]) > 1
 
     def _cleanup_objs(self, context):
+
         print("Cleaning up objects...")
         '''Check sliced objects for existing geometry/valid dimensions and then rename,
         otherwise delete.'''
 
         context.scene.objects.update()
-        objs = context.view_layer.objects
+        objs = context.view_layer.objects[:]
+        if self.debug_cleanup:
+            pprint.pprint(objs)
         bpy.ops.object.select_all(action="DESELECT")
         cleanup_objs = [obj for obj in objs if "__Sliced__" in obj.name]
         orig_name = re.sub("(\.\d+$)", '', self.orig_name)
 
-        for obj in cleanup_objs:
+        async def delete_small_obj(obj):
             dims = obj.dimensions
             if not obj.data.vertices[:] or self._invalid_dimensions(dims):
                 context.collection.objects.unlink(obj)
+                # bpy.data.objects.remove(obj)
                 cleanup_objs.remove(obj)
-        for i, obj in enumerate(cleanup_objs):
+
+        async def rename_obj(obj, i):
             if self.reset_origins:
                 obj.select_set(True)
             new_name = f"{orig_name}_Sliced_{i+1}"
             obj.name = new_name
+
+        async def cleanup_small_objects():
+            coros = [delete_small_obj(obj) for obj in cleanup_objs]
+            await asyncio.gather(*coros)
+
+        async def rename_objects():
+            coros = [rename_obj(obj, i) for i, obj in enumerate(cleanup_objs)]
+            await asyncio.gather(*coros)
+
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(cleanup_small_objects())
+        loop.run_until_complete(rename_objects())
+
         if self.reset_origins:
             bpy.ops.object.origin_set(type='ORIGIN_GEOMETRY', center='MEDIAN')
         bpy.ops.object.select_all(action="DESELECT")
@@ -237,10 +263,15 @@ class OBJECT_OT_chunk_slicer(bpy.types.Operator):
             self.num_slices = Vector([dim // self.cell_size for dim in self.dims])
             for axis in self.axes:
                 current_loc = self._get_start_loc(axis)
-                for i in range(self._slices_in_axis(axis) + 1):
-                    new_loc = current_loc + self.cell_size
-                    self.slice_locs[axis].append(new_loc)
-                    current_loc = new_loc
+                if self.debug_slice:
+                    print("Start_loc: ", current_loc, "Axis: ", axis)
+                if getattr(self.dims, axis) <= self.cell_size:
+                    self.slice_locs[axis] = []
+                else:
+                    for i in range(self._slices_in_axis(axis) + 1):
+                        new_loc = current_loc + self.cell_size
+                        self.slice_locs[axis].append(new_loc)
+                        current_loc = new_loc
 
         elif self.slice_type == "RELATIVE":
             qty = self.slice_qty + 1
@@ -248,10 +279,23 @@ class OBJECT_OT_chunk_slicer(bpy.types.Operator):
             self.num_slices = Vector([qty] * 3)
             for axis in self.axes:
                 current_loc = self._get_start_loc(axis)
+                if self.debug_slice:
+                    print("Start_loc: ", current_loc, "Axis: ", axis)
                 for i in range(self._slices_in_axis(axis)):
                     new_loc = current_loc + getattr(self.cell_sizes, axis)
                     self.slice_locs[axis].append(new_loc)
                     current_loc = new_loc
+        if self.debug_slice:
+            print("Dims: ", self.dims)
+            print("Num_Slices:", self.num_slices)
+            pprint.pprint(self.slice_locs)
+
+    @staticmethod
+    def delete_previous_dirty_objs():
+        for obj in bpy.data.objects[:]:
+            if "__Slice__" in obj.name:
+                print("Deleting previous dirty object: ", obj.name)
+                bpy.data.objects.remove(obj)
 
     @classmethod
     def poll(cls, context):
@@ -259,6 +303,7 @@ class OBJECT_OT_chunk_slicer(bpy.types.Operator):
         return obj is not None and obj.type == "MESH" and context.mode == "OBJECT"
 
     def invoke(self, context, event):
+
         self.obj = context.active_object
         self.orig_name = self.obj.name
         self.mesh = self.obj.data
@@ -284,31 +329,48 @@ class OBJECT_OT_chunk_slicer(bpy.types.Operator):
     def execute(self, context):
         self.sliced_x = []
         self.sliced_y = []
-
+        if self.debug_slice or self.debug_cleanup:
+            self.delete_previous_dirty_objs()
         print("Slicing...")
-
-        col_objs = context.collection.objects
 
         async def slice_x():
             self.current_axis = "x"
             x_locs = self.slice_locs[self.current_axis]
-            coros = [self.async_slice(context, loc, index, outlist=self.sliced_x) for index, loc in enumerate(x_locs)]
-            await asyncio.gather(*coros)
+            if x_locs:
+                coros = [
+                    self.async_slice(
+                        context,
+                        loc,
+                        index,
+                        outlist=self.sliced_x,
+                    )
+                    for index, loc in enumerate(x_locs)
+                ]
+                await asyncio.gather(*coros)
 
         async def slice_y():
             self.current_axis = "y"
             y_locs = self.slice_locs[self.current_axis]
             # like here, if user didn't choose to slice on the x-axis, we just pretend
             # the sliced_x list was just the first object all along.
-            if not self.sliced_x:
-                self.sliced_x = [self.obj]
-            for obj in self.sliced_x:
-                self.obj = obj
-                coros = [
-                    self.async_slice(context, loc, index, outlist=self.sliced_y) for index, loc in enumerate(y_locs)
-                ]
-                await asyncio.gather(*coros)
-                context.collection.objects.unlink(obj)
+            if y_locs:
+                if not self.sliced_x:
+                    self.sliced_x = [self.obj]
+                for obj in self.sliced_x:
+                    self.obj = obj
+                    coros = [
+                        self.async_slice(
+                            context,
+                            loc,
+                            index,
+                            outlist=self.sliced_y,
+                        )
+                        for index, loc in enumerate(y_locs)
+                    ]
+                    await asyncio.gather(*coros)
+
+                    context.collection.objects.unlink(obj)
+                    # bpy.data.objects.remove(obj)
 
         async def slice_z():
             self.current_axis = "z"
@@ -316,16 +378,18 @@ class OBJECT_OT_chunk_slicer(bpy.types.Operator):
             # same deal, if user only chose z then the slice_y is just the first obj.
             # else if they chose x and z, then pretend that sliced_y is sliced_x
             # without actually slicing y.
-            if not self.sliced_y:
-                if not self.sliced_x:
-                    self.sliced_y = [self.obj]
-                else:
-                    self.sliced_y = self.sliced_x
-            for obj in self.sliced_y:
-                self.obj = obj
-                coros = [self.async_slice(context, loc, index) for index, loc in enumerate(z_locs)]
-                await asyncio.gather(*coros)
-                context.collection.objects.unlink(obj)
+            if z_locs:
+                if not self.sliced_y:
+                    if not self.sliced_x:
+                        self.sliced_y = [self.obj]
+                    else:
+                        self.sliced_y = self.sliced_x
+                for obj in self.sliced_y:
+                    self.obj = obj
+                    coros = [self.async_slice(context, loc, index) for index, loc in enumerate(z_locs)]
+                    await asyncio.gather(*coros)
+                    context.collection.objects.unlink(obj)
+                    # bpy.data.objects.remove(obj)
 
         self._get_slice_locs()
         if not self.force and not (self._mesh_has_manifold_geom()):
