@@ -6,7 +6,8 @@ bl_info = {
     "blender": (2, 80, 0),
     "location": "Operator Search > Chunk Slicer",
     "category": "Modeling",
-    "internet": "https://github.com/jmobley0429/chunk_slicer/blob/master/chunk_slicer.py",
+    "tracker_url": "https://github.com/jmobley0429/chunk_slicer/issues",
+    "doc_url": "https://github.com/jmobley0429/chunk_slicer/blob/master/README.md",
 }
 
 
