@@ -9,7 +9,7 @@ import asyncio
 
 from mathutils import Vector
 from collections import defaultdict
-from my_pie_menus.resources import utils
+
 
 
 class OBJECT_OT_chunk_slicer(bpy.types.Operator):
